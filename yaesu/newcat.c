@@ -230,23 +230,973 @@ const struct confparams newcat_cfg_params[] = {
 	{ RIG_CONF_END, NULL, }
 };
 
-/* NewCAT Internal Functions */
-static ncboolean newcat_is_rig(RIG * rig, rig_model_t model);
-static int newcat_get_tx_vfo(RIG * rig, vfo_t * tx_vfo);
-static int newcat_set_tx_vfo(RIG * rig, vfo_t tx_vfo);
+/* 
+ * ************************************
+ *
+ * NewCAT Internal Functions
+ *
+ * ************************************
+ */
+static ncboolean newcat_is_rig(RIG * rig, rig_model_t model) {
+    ncboolean is_rig;
 
-static int newcat_set_vfo_from_alias(RIG * rig, vfo_t * vfo);
-static int newcat_scale_float(int scale, float fval);
-static int newcat_get_rx_bandwidth(RIG *rig, vfo_t vfo, rmode_t mode, pbwidth_t *width);
-static int newcat_set_rx_bandwidth(RIG *rig, vfo_t vfo, rmode_t mode, pbwidth_t width);
-static int newcat_set_narrow(RIG * rig, vfo_t vfo, ncboolean narrow);
-static int newcat_get_narrow(RIG * rig, vfo_t vfo, ncboolean * narrow);
-static int newcat_set_faststep(RIG * rig, ncboolean fast_step);
-static int newcat_get_faststep(RIG * rig, ncboolean * fast_step);
-static int newcat_get_rigid(RIG * rig);
-static int newcat_get_vfo_mode(RIG * rig, vfo_t * vfo_mode);
-static int newcat_vfomem_toggle(RIG * rig);
-static ncboolean newcat_valid_command(RIG *rig, char const * const command);
+    is_rig = (model == rig->caps->rig_model) ? TRUE : FALSE;
+
+    return is_rig;
+}
+
+static int newcat_get_rigid(RIG * rig)
+{
+    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
+    const char * s = NULL;
+
+    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
+
+    /* if first valid get */
+    if (priv->rig_id == NC_RIGID_NONE) {
+        s = newcat_get_info(rig);
+        if (s != NULL) {
+            s +=2;      /* ID0310, jump past ID */
+            priv->rig_id = atoi(s);
+        }
+    }
+
+    rig_debug(RIG_DEBUG_TRACE, "rig_id = %d, *s = %s\n", priv->rig_id, s);
+
+    return priv->rig_id;
+}
+
+
+/*
+ * newcat_valid_command
+ *
+ * Determine whether or not the command is valid for the specified
+ * rig.  This function should be called before sending the command
+ * to the rig to make it easier to differentiate invalid and illegal
+ * commands (for a rig).
+ */
+
+static ncboolean newcat_valid_command(RIG *rig, char const * const command) {
+    const struct rig_caps *caps;
+    ncboolean is_ft450;
+    ncboolean is_ft891;
+    ncboolean is_ft950;
+    ncboolean is_ft991;
+    ncboolean is_ft2000;
+    ncboolean is_ft9000;
+    ncboolean is_ft5000;
+    ncboolean is_ft1200;
+    int search_high;
+    int search_index;
+    int search_low;
+
+    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
+    rig_debug(RIG_DEBUG_TRACE, "%s %s\n", __func__,command);
+
+    if (!rig) {
+        rig_debug(RIG_DEBUG_ERR, "%s: Rig argument is invalid\n", __func__);
+        return FALSE;
+    }
+
+    caps = rig->caps;
+    if (!caps) {
+        rig_debug(RIG_DEBUG_ERR, "%s: Rig capabilities not valid\n", __func__);
+        return FALSE;
+    }
+
+    /*
+     * Determine the type of rig from the model number.  Note it is
+     * possible for several model variants to exist; i.e., all the
+     * FT-9000 variants.
+     */
+
+    is_ft450 = newcat_is_rig(rig, RIG_MODEL_FT450);
+    is_ft891 = newcat_is_rig(rig, RIG_MODEL_FT891);
+    is_ft950 = newcat_is_rig(rig, RIG_MODEL_FT950);
+    is_ft991 = newcat_is_rig(rig, RIG_MODEL_FT991);
+    is_ft2000 = newcat_is_rig(rig, RIG_MODEL_FT2000);
+    is_ft9000 = newcat_is_rig(rig, RIG_MODEL_FT9000);
+    is_ft5000 = newcat_is_rig(rig, RIG_MODEL_FTDX5000);
+    is_ft1200 = newcat_is_rig(rig, RIG_MODEL_FT1200);
+
+
+    if (!is_ft450 && !is_ft950 && !is_ft891 && !is_ft991 && !is_ft2000 && !is_ft5000 && !is_ft9000 & !is_ft1200 ) {
+        rig_debug(RIG_DEBUG_ERR, "%s: '%s' is unknown\n",
+                __func__, caps->model_name);
+        return FALSE;
+    }
+
+    /*
+     * Make sure the command is known, and then check to make sure
+     * is it valud for the rig.
+     */
+
+    search_low = 0;
+    search_high = valid_commands_count;
+    while (search_low <= search_high) {
+        int search_test;
+
+        search_index = (search_low + search_high) / 2;
+        search_test = strcmp (valid_commands[search_index].command, command);
+        if (search_test > 0)
+            search_high = search_index - 1;
+        else if (search_test < 0)
+            search_low = search_index + 1;
+        else {
+            /*
+             * The command is valid.  Now make sure it is supported by the rig.
+             */
+            if (is_ft450 && valid_commands[search_index].ft450)
+                return TRUE;
+            else if (is_ft891 && valid_commands[search_index].ft891)
+                return TRUE;
+            else if (is_ft950 && valid_commands[search_index].ft950)
+                return TRUE;
+            else if (is_ft991 && valid_commands[search_index].ft991)
+                return TRUE;
+            else if (is_ft2000 && valid_commands[search_index].ft2000)
+                return TRUE;
+            else if (is_ft5000 && valid_commands[search_index].ft5000)
+                return TRUE;
+            else if (is_ft9000 && valid_commands[search_index].ft9000)
+                return TRUE;
+            else if (is_ft1200 && valid_commands[search_index].ft1200)
+                return TRUE;
+            else {
+                rig_debug(RIG_DEBUG_TRACE, "%s: '%s' command '%s' not supported\n",
+                        __func__, caps->model_name, command);
+                return FALSE;
+            }
+        }
+    }
+
+    rig_debug(RIG_DEBUG_TRACE, "%s: '%s' command '%s' not valid\n",
+            __func__, caps->model_name, command);
+    return FALSE;
+}
+
+
+
+/*
+ * input:   RIG *, vfo_t *
+ * output:  VFO mode: RIG_VFO_VFO for VFO A and B
+ *                    RIG_VFO_MEM for VFO MEM
+ * return: RIG_OK or error
+ */
+static int newcat_get_vfo_mode(RIG * rig, vfo_t * vfo_mode)
+{
+    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
+    int err;
+
+    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
+
+    if (!newcat_valid_command(rig, "IF"))
+        return -RIG_ENAVAIL;
+
+    /* Get VFO A Information ****************** */
+    snprintf(priv->cmd_str, sizeof(priv->cmd_str), "IF;");
+    if (RIG_OK != (err = newcat_get_cmd (rig)))
+      {
+        return err;
+      }
+
+    /* vfo, mem, P7 ************************** */
+    // e.g. FT450 has 27 byte IF response, FT991 has 28 byte if response (one more byte for P2 VFO A Freq)
+    // so we now check to ensure we know the length of the response
+    int offset = 0;
+    switch(strlen(priv->ret_data)) {
+        case 27: offset = 21;priv->width_frequency=8;break;
+        case 28: offset = 22;priv->width_frequency=9;break;
+        default:
+          rig_debug(RIG_DEBUG_ERR,"%s: incorrect length of IF response, expected 27 or 28, got %d",__func__,strlen(priv->ret_data));
+          return -RIG_EPROTO;
+    }
+    rig_debug(RIG_DEBUG_TRACE, "%s: offset=%d, width_frequeny=%d\n", __func__,offset,priv->width_frequency);
+    switch (priv->ret_data[offset]) {
+        case '0': *vfo_mode = RIG_VFO_VFO; break;
+        case '1':   /* Memory */
+        case '2':   /* Memory Tune */
+        case '3':   /* Quick Memory Bank */
+        case '4':   /* Quick Memory Bank Tune */
+        default:
+                  *vfo_mode = RIG_VFO_MEM;
+    }
+
+    rig_debug(RIG_DEBUG_TRACE, "%s: vfo mode = %d\n", __func__, *vfo_mode);
+
+    return err;
+}
+
+
+/*
+ * newcat_get_tx_vfo does not set priv->curr_vfo
+ */
+static int newcat_get_tx_vfo(RIG * rig, vfo_t * tx_vfo) {
+    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
+    int err;
+    char c;
+    vfo_t vfo_mode;
+
+    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
+
+    if (!newcat_valid_command(rig, "FT"))
+      return -RIG_ENAVAIL;
+    snprintf(priv->cmd_str, sizeof(priv->cmd_str), "FT;");
+    rig_debug(RIG_DEBUG_TRACE, "cmd_str = %s\n", priv->cmd_str);
+
+    /* Get TX VFO */
+    if (RIG_OK != (err = newcat_get_cmd (rig)))
+      {
+        return err;
+      }
+
+    c = priv->ret_data[2];
+    switch (c) {
+        case '0':
+            *tx_vfo = RIG_VFO_A;
+            break;
+        case '1' :
+            *tx_vfo = RIG_VFO_B;
+            break;
+        default:
+            rig_debug(RIG_DEBUG_ERR, "%s: Unknown tx_vfo=%c\n", __func__, c, priv->ret_data);
+            return -RIG_EPROTO;
+    }
+
+    /* Check to see if RIG is in MEM mode */
+    err = newcat_get_vfo_mode(rig, &vfo_mode);
+    if (vfo_mode == RIG_VFO_MEM && *tx_vfo == RIG_VFO_A)
+        *tx_vfo = RIG_VFO_MEM;
+
+    rig_debug(RIG_DEBUG_TRACE, "%s: tx_vfo = %s\n", __func__, rig_strvfo(*tx_vfo));
+
+    return RIG_OK;
+}
+
+
+static int newcat_set_vfo_from_alias(RIG * rig, vfo_t * vfo) {
+
+    rig_debug(RIG_DEBUG_TRACE, "%s: alias vfo = %s\n", __func__, rig_strvfo(*vfo));
+
+    switch (*vfo) {
+        case RIG_VFO_A:
+        case RIG_VFO_B:
+        case RIG_VFO_MEM:
+            /* passes through */
+            break;
+        case RIG_VFO_CURR:  /* RIG_VFO_RX == RIG_VFO_CURR */
+        case RIG_VFO_VFO:
+            *vfo = rig->state.current_vfo;
+            break;
+        case RIG_VFO_TX:
+            /* set to another vfo for split or uplink */
+            *vfo = (rig->state.current_vfo == RIG_VFO_B) ? RIG_VFO_A : RIG_VFO_B;
+            break;
+        case RIG_VFO_MAIN:
+            *vfo = RIG_VFO_A;
+            break;
+        case RIG_VFO_SUB:
+            *vfo = RIG_VFO_B;
+            break;
+        default:
+            rig_debug(RIG_DEBUG_TRACE, "Unrecognized.  vfo= %d\n", *vfo);
+            return -RIG_EINVAL;
+    }
+
+    return RIG_OK;
+}
+
+/*
+ * newcat_set_tx_vfo does not set priv->curr_vfo
+ */
+static int newcat_set_tx_vfo(RIG * rig, vfo_t tx_vfo) {
+    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
+    int err;
+    char p1;
+
+    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
+
+    if (!newcat_valid_command(rig, "FT"))
+        return -RIG_ENAVAIL;
+
+    err = newcat_set_vfo_from_alias(rig, &tx_vfo);
+    if (err < 0)
+        return err;
+
+    switch (tx_vfo) {
+        case RIG_VFO_A:
+            p1 = '0';
+            break;
+        case RIG_VFO_B:
+            p1 = '1';
+            break;
+        case RIG_VFO_MEM:
+            /* VFO A */
+            if (priv->current_mem == NC_MEM_CHANNEL_NONE)
+                return RIG_OK;
+            else    /* Memory Channel mode */
+                p1 = '0';
+            break;
+        default:
+            return -RIG_EINVAL;
+    }
+
+    /* TODO: G4WJS - FT-450 only has toggle command so not sure how to
+       definitively set the TX VFO (VS; doesn't seem to help
+       either) */
+    if (newcat_is_rig(rig, RIG_MODEL_FT950) ||
+        newcat_is_rig(rig, RIG_MODEL_FT2000) ||
+        newcat_is_rig(rig, RIG_MODEL_FTDX5000) ||
+        newcat_is_rig(rig, RIG_MODEL_FT1200) ||
+        newcat_is_rig(rig, RIG_MODEL_FT991))
+      p1 = p1 + 2;            /* use non-Toggle commands */
+
+    snprintf(priv->cmd_str, sizeof(priv->cmd_str), "FT%c;", p1);
+
+    rig_debug(RIG_DEBUG_TRACE, "cmd_str = %s\n", priv->cmd_str);
+
+    /* Set TX VFO */
+    return newcat_set_cmd(rig);
+}
+
+
+
+/*
+ *	Found newcat_set_level() floating point math problem
+ *	Using rigctl on FT950 I was trying to set RIG_LEVEL_COMP to 12
+ *	I kept setting it to 11.  I wrote some test software and
+ *	found out that 0.12 * 100 = 11 with my setup.
+ *  Compilier is gcc 4.2.4, CPU is AMD X2
+ *  This works somewhat but Find a better way.
+ *  The newcat_get_level() seems to work correctly.
+ *  Terry KJ4EED
+ *
+ */
+static int newcat_scale_float(int scale, float fval) {
+    float f;
+    float fudge = 0.003;
+
+    if ((fval + fudge) > 1.0)
+        f = scale * fval;
+    else
+        f = scale * (fval + fudge);
+
+    return (int) f;
+}
+
+static int newcat_set_narrow(RIG * rig, vfo_t vfo, ncboolean narrow)
+{
+    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
+    int err;
+    char c;
+    char main_sub_vfo = '0';
+
+    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
+
+    if (!newcat_valid_command(rig, "NA"))
+        return -RIG_ENAVAIL;
+
+    err = newcat_set_vfo_from_alias(rig, &vfo);
+    if (err < 0)
+        return err;
+
+    if (newcat_is_rig(rig, RIG_MODEL_FT9000) ||
+            newcat_is_rig(rig, RIG_MODEL_FT2000) ||
+            newcat_is_rig(rig, RIG_MODEL_FTDX5000))
+        main_sub_vfo = (RIG_VFO_B == vfo) ? '1' : '0';
+
+    if (narrow == TRUE)
+        c = '1';
+    else
+        c = '0';
+
+    snprintf(priv->cmd_str, sizeof(priv->cmd_str), "NA%c%c;", main_sub_vfo, c);
+
+    rig_debug(RIG_DEBUG_TRACE, "cmd_str = %s\n", priv->cmd_str);
+
+    return newcat_set_cmd(rig);
+}
+
+
+static int newcat_get_narrow(RIG * rig, vfo_t vfo, ncboolean * narrow)
+{
+    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
+    int err;
+    char c;
+    char main_sub_vfo = '0';
+
+    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
+
+    if (!newcat_valid_command(rig, "NA"))
+        return -RIG_ENAVAIL;
+
+    err = newcat_set_vfo_from_alias(rig, &vfo);
+    if (err < 0)
+        return err;
+
+    if (newcat_is_rig(rig, RIG_MODEL_FT9000) ||
+            newcat_is_rig(rig, RIG_MODEL_FT2000) ||
+            newcat_is_rig(rig, RIG_MODEL_FTDX5000))
+        main_sub_vfo = (RIG_VFO_B == vfo) ? '1' : '0';
+
+    snprintf(priv->cmd_str, sizeof(priv->cmd_str), "NA%c;", main_sub_vfo);
+    /* Get NAR */
+    if (RIG_OK != (err = newcat_get_cmd (rig)))
+      {
+        return err;
+      }
+
+    c = priv->ret_data[3];
+    if (c == '1')
+        *narrow = TRUE;
+    else
+        *narrow = FALSE;
+
+    return RIG_OK;
+}
+
+
+
+static int newcat_get_rx_bandwidth(RIG *rig, vfo_t vfo, rmode_t mode, pbwidth_t *width)
+{
+    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
+    int err;
+    int ret_data_len;
+    char *retlvl;
+    int w;
+    char main_sub_vfo = '0';
+
+    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
+
+    if (!newcat_valid_command(rig, "SH"))
+        return -RIG_ENAVAIL;
+
+    err = newcat_set_vfo_from_alias(rig, &vfo);
+    if (err < 0)
+        return err;
+
+    if (newcat_is_rig(rig, RIG_MODEL_FT9000) ||
+            newcat_is_rig(rig, RIG_MODEL_FTDX5000))
+        main_sub_vfo = (RIG_VFO_B == vfo) ? '1' : '0';
+
+    snprintf(priv->cmd_str, sizeof(priv->cmd_str), "SH%c;", main_sub_vfo);
+
+    /* Get RX BANDWIDTH */
+    if (RIG_OK != (err = newcat_get_cmd (rig)))
+      {
+        return err;
+      }
+
+    ret_data_len = strlen(priv->ret_data);
+
+    /* skip command */
+    retlvl = priv->ret_data + strlen(priv->cmd_str)-1;
+    /* chop term */
+    priv->ret_data[ret_data_len-1] = '\0';
+
+    w = atoi(retlvl);   /*  width */
+
+    if (newcat_is_rig(rig, RIG_MODEL_FT950)) {
+        switch (mode) {
+            case RIG_MODE_PKTUSB:
+            case RIG_MODE_PKTLSB:
+            case RIG_MODE_RTTY:
+            case RIG_MODE_RTTYR:
+            case RIG_MODE_CW:
+            case RIG_MODE_CWR:
+                switch (w) {
+                    case 11: *width = 1700; break;  /* normal */
+                    case  0:
+                    case  7: *width =  500; break;  /* narrow */
+                    case 13: *width = 2400; break;  /* wide   */
+                    case 12: *width = 2000; break;
+                    case 10: *width = 1400; break;
+                    case  9: *width = 1200; break;
+                    case  8: *width =  800; break;
+                    case  6: *width =  400; break;
+                    case  5: *width =  300; break;
+                    case  3: *width =  100; break;
+                    case  4: *width =  200; break;
+                    default: return -RIG_EINVAL;
+                }
+                break;
+            case RIG_MODE_LSB:
+            case RIG_MODE_USB:
+                switch (w) {
+                    case  0:
+                    case 13: *width = 2400; break;  /* normal */
+                    case  9: *width = 1800; break;  /* narrow */
+                    case 20: *width = 3000; break;  /* wide   */
+                    case 19: *width = 2900; break;
+                    case 18: *width = 2800; break;
+                    case 17: *width = 2700; break;
+                    case 16: *width = 2600; break;
+                    case 15: *width = 2500; break;
+                    case 14: *width = 2450; break;
+                    case 12: *width = 2250; break;
+                    case 11: *width = 2100; break;
+                    case 10: *width = 1950; break;
+                    case  8: *width = 1650; break;
+                    case  7: *width = 1500; break;
+                    case  6: *width = 1350; break;
+                    case  5: *width = 1100; break;
+                    case  4: *width =  850; break;
+                    case  3: *width =  600; break;
+                    case  2: *width =  400; break;
+                    case  1: *width =  200; break;
+                    default: return -RIG_EINVAL;
+                }
+                break;
+            case RIG_MODE_AM:
+            case RIG_MODE_PKTFM:
+            case RIG_MODE_FM:
+                return RIG_OK;
+            default:
+                return -RIG_EINVAL;
+        }   /* end switch(mode) */
+
+    }   /* end if FT950 */
+    else if (newcat_is_rig(rig, RIG_MODEL_FT1200)) {
+        switch (mode) {
+            case RIG_MODE_PKTUSB:
+            case RIG_MODE_PKTLSB:
+            case RIG_MODE_RTTY:
+            case RIG_MODE_RTTYR:
+            case RIG_MODE_CW:
+            case RIG_MODE_CWR:
+                switch (w) {
+                    case  0:
+                    case 10: *width =  500; break;  /* narrow */
+                    case 16: *width = 2400; break;  /* wide   */
+                    case 15: *width = 2000; break;  /* wide   */
+                    case 14: *width = 1700; break;  /* wide   */
+                    case 13: *width = 1400; break;  /* wide   */
+                    case 12: *width = 1200; break;
+                    case 11: *width =  800; break;
+                    case  9: *width =  450; break;
+                    case  8: *width =  400; break;
+                    case  7: *width =  350; break;
+                    case  6: *width =  300; break;
+                    case  5: *width =  250; break;
+                    case  4: *width =  200; break;
+                    case  3: *width =  150; break;
+                    case  2: *width =  100; break;
+                    case  1: *width =   50; break;
+                    default: return -RIG_EINVAL;
+                }
+                break;
+            case RIG_MODE_LSB:
+            case RIG_MODE_USB:
+                switch (w) {
+                    case  0:
+                    case 14: *width = 2400; break;  /* normal */
+                    case  9: *width = 1800; break;  /* narrow */
+                    case 25: *width = 4000; break;  /* wide   */
+                    case 24: *width = 3800; break;  /* wide   */
+                    case 23: *width = 3600; break;  /* wide   */
+                    case 22: *width = 3400; break;  /* wide   */
+                    case 21: *width = 3200; break;  /* wide   */
+                    case 20: *width = 3000; break;  /* wide   */
+                    case 19: *width = 2900; break;
+                    case 18: *width = 2800; break;
+                    case 17: *width = 2700; break;
+                    case 16: *width = 2600; break;
+                    case 15: *width = 2500; break;
+                    case 13: *width = 2300; break;
+                    case 12: *width = 2200; break;
+                    case 11: *width = 2100; break;
+                    case 10: *width = 1950; break;
+                    case  8: *width = 1650; break;
+                    case  7: *width = 1500; break;
+                    case  6: *width = 1350; break;
+                    case  5: *width = 1100; break;
+                    case  4: *width =  850; break;
+                    case  3: *width =  600; break;
+                    case  2: *width =  400; break;
+                    case  1: *width =  200; break;
+                    default: return -RIG_EINVAL;
+                }
+                break;
+            case RIG_MODE_AM:
+            case RIG_MODE_PKTFM:
+            case RIG_MODE_FM:
+                return RIG_OK;
+            default:
+                return -RIG_EINVAL;
+        }   /* end switch(mode) */
+
+    }  else { /* end if FT950 */
+        /* FT450, FT2000, FT5000, FT9000 */
+        switch (mode) {
+            case RIG_MODE_PKTUSB:
+            case RIG_MODE_PKTLSB:
+            case RIG_MODE_RTTY:
+            case RIG_MODE_RTTYR:
+            case RIG_MODE_CW:
+            case RIG_MODE_CWR:
+            case RIG_MODE_LSB:
+            case RIG_MODE_USB:
+                if (w < 16)
+                    *width = rig_passband_narrow(rig, mode);
+                else if (w > 16)
+                    *width = rig_passband_wide(rig, mode);
+                else
+                    *width = rig_passband_normal(rig, mode);
+                break;
+            case RIG_MODE_AM:
+            case RIG_MODE_PKTFM:
+            case RIG_MODE_FM:
+                return RIG_OK;
+            default:
+                return -RIG_EINVAL;
+        }   /* end switch (mode) */
+    }   /* end else */
+
+    return RIG_OK;
+}
+
+
+
+
+static int newcat_set_rx_bandwidth(RIG *rig, vfo_t vfo, rmode_t mode, pbwidth_t width)
+{
+    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
+    int err;
+    char width_str[6];        /* extra larger buffer */
+    char main_sub_vfo = '0';
+    char narrow = '0';
+
+    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
+    rig_debug(RIG_DEBUG_TRACE, "%s vfo=%d, mode=%d, width=%d\n", __func__, vfo, mode, width);
+
+    if (!newcat_valid_command(rig, "SH"))
+        return -RIG_ENAVAIL;
+
+    err = newcat_set_vfo_from_alias(rig, &vfo);
+    if (err < 0)
+        return err;
+
+    if (newcat_is_rig(rig, RIG_MODEL_FT9000) ||
+            newcat_is_rig(rig, RIG_MODEL_FTDX5000))
+        main_sub_vfo = (RIG_VFO_B == vfo) ? '1' : '0';
+
+    if (newcat_is_rig(rig, RIG_MODEL_FT950)) {
+        switch (mode) {
+            case RIG_MODE_PKTUSB:
+            case RIG_MODE_PKTLSB:
+            case RIG_MODE_RTTY:
+            case RIG_MODE_RTTYR:
+            case RIG_MODE_CW:
+            case RIG_MODE_CWR:
+                switch (width) {
+                    case 1700: snprintf(width_str, sizeof(width_str), "11"); narrow = '0'; break;  /* normal */
+                    case  500: snprintf(width_str, sizeof(width_str), "07"); narrow = '0'; break;  /* narrow */
+                    case 2400: snprintf(width_str, sizeof(width_str), "13"); narrow = '0'; break;  /* wide */
+                    case 2000: snprintf(width_str, sizeof(width_str), "12"); narrow = '0'; break;
+                    case 1400: snprintf(width_str, sizeof(width_str), "10"); narrow = '0'; break;
+                    case 1200: snprintf(width_str, sizeof(width_str), "09"); narrow = '0'; break;
+                    case  800: snprintf(width_str, sizeof(width_str), "08"); narrow = '0'; break;
+                    case  400: snprintf(width_str, sizeof(width_str), "06"); narrow = '1'; break;
+                    case  300: snprintf(width_str, sizeof(width_str), "05"); narrow = '1'; break;
+                    case  200: snprintf(width_str, sizeof(width_str), "04"); narrow = '1'; break;
+                    case  100: snprintf(width_str, sizeof(width_str), "03"); narrow = '1'; break;
+                    default: return -RIG_EINVAL;
+                }
+                break;
+            case RIG_MODE_LSB:
+            case RIG_MODE_USB:
+                switch (width) {
+                    case 2400: snprintf(width_str, sizeof(width_str), "13"); narrow = '0'; break;  /* normal */
+                    case 1800: snprintf(width_str, sizeof(width_str), "09"); narrow = '0'; break;  /* narrow */
+                    case 3000: snprintf(width_str, sizeof(width_str), "20"); narrow = '0'; break;  /* wide */
+                    case 2900: snprintf(width_str, sizeof(width_str), "19"); narrow = '0'; break;
+                    case 2800: snprintf(width_str, sizeof(width_str), "18"); narrow = '0'; break;
+                    case 2700: snprintf(width_str, sizeof(width_str), "17"); narrow = '0'; break;
+                    case 2600: snprintf(width_str, sizeof(width_str), "16"); narrow = '0'; break;
+                    case 2500: snprintf(width_str, sizeof(width_str), "15"); narrow = '0'; break;
+                    case 2450: snprintf(width_str, sizeof(width_str), "14"); narrow = '0'; break;
+                    case 2250: snprintf(width_str, sizeof(width_str), "12"); narrow = '0'; break;
+                    case 2100: snprintf(width_str, sizeof(width_str), "11"); narrow = '0'; break;
+                    case 1950: snprintf(width_str, sizeof(width_str), "10"); narrow = '0'; break;
+                    case 1650: snprintf(width_str, sizeof(width_str), "08"); narrow = '1'; break;
+                    case 1500: snprintf(width_str, sizeof(width_str), "07"); narrow = '1'; break;
+                    case 1350: snprintf(width_str, sizeof(width_str), "06"); narrow = '1'; break;
+                    case 1100: snprintf(width_str, sizeof(width_str), "05"); narrow = '1'; break;
+                    case  850: snprintf(width_str, sizeof(width_str), "04"); narrow = '1'; break;
+                    case  600: snprintf(width_str, sizeof(width_str), "03"); narrow = '1'; break;
+                    case  400: snprintf(width_str, sizeof(width_str), "02"); narrow = '1'; break;
+                    case  200: snprintf(width_str, sizeof(width_str), "01"); narrow = '1';  break;
+                    default: return -RIG_EINVAL;
+                }
+                break;
+            case RIG_MODE_AM:
+            case RIG_MODE_FM:
+            case RIG_MODE_PKTFM:
+                if (width < rig_passband_normal(rig, mode))
+                    err = newcat_set_narrow(rig, vfo, TRUE);
+                else
+                    err = newcat_set_narrow(rig, vfo, FALSE);
+                return err;
+            default:
+                return -RIG_EINVAL;
+        }   /* end switch(mode) */
+    }   /* end if FT950 */
+    else if (newcat_is_rig(rig, RIG_MODEL_FT991) || newcat_is_rig(rig, RIG_MODEL_FT891)) {
+        switch (mode) {
+            case RIG_MODE_PKTUSB:
+            case RIG_MODE_PKTLSB:
+            case RIG_MODE_RTTY:
+            case RIG_MODE_RTTYR:
+            case RIG_MODE_CW:
+            case RIG_MODE_CWR:
+                switch (width) { // the defaults can be different for CW and RTTY (e.g. FT991) but I don't think it matters here
+                    case 1700: snprintf(width_str, sizeof(width_str), "14"); narrow = '0'; break;  /* normal */
+                    case  500: snprintf(width_str, sizeof(width_str), "10"); narrow = '0'; break;  /* narrow */
+                    case 3000: snprintf(width_str, sizeof(width_str), "17"); narrow = '0'; break;  /* wide */
+                    case 2400: snprintf(width_str, sizeof(width_str), "16"); narrow = '0'; break;
+                    case 2000: snprintf(width_str, sizeof(width_str), "15"); narrow = '0'; break;
+                    case 1400: snprintf(width_str, sizeof(width_str), "13"); narrow = '0'; break;
+                    case 1200: snprintf(width_str, sizeof(width_str), "12"); narrow = '0'; break;
+                    case  800: snprintf(width_str, sizeof(width_str), "11"); narrow = '0'; break;
+                    case  450: snprintf(width_str, sizeof(width_str), "09"); narrow = '1'; break;
+                    case  400: snprintf(width_str, sizeof(width_str), "08"); narrow = '1'; break;
+                    case  350: snprintf(width_str, sizeof(width_str), "07"); narrow = '1'; break;
+                    case  300: snprintf(width_str, sizeof(width_str), "06"); narrow = '1'; break;
+                    case  250: snprintf(width_str, sizeof(width_str), "05"); narrow = '1'; break;
+                    case  200: snprintf(width_str, sizeof(width_str), "04"); narrow = '1'; break;
+                    case  150: snprintf(width_str, sizeof(width_str), "03"); narrow = '1'; break;
+                    case  100: snprintf(width_str, sizeof(width_str), "02"); narrow = '1'; break;
+                    case   50: snprintf(width_str, sizeof(width_str), "01"); narrow = '1'; break;
+                    default: return -RIG_EINVAL;
+                }
+                break;
+            case RIG_MODE_LSB:
+            case RIG_MODE_USB:
+                switch (width) {
+                    case 2400: snprintf(width_str, sizeof(width_str), "14"); narrow = '0'; break;  /* normal */
+                    case 1500: snprintf(width_str, sizeof(width_str), "07"); narrow = '0'; break;  /* narrow */
+                    case 3200: snprintf(width_str, sizeof(width_str), "21"); narrow = '0'; break;  /* wide */
+                    case 3000: snprintf(width_str, sizeof(width_str), "20"); narrow = '0'; break;
+                    case 2900: snprintf(width_str, sizeof(width_str), "19"); narrow = '0'; break;
+                    case 2800: snprintf(width_str, sizeof(width_str), "18"); narrow = '0'; break;
+                    case 2700: snprintf(width_str, sizeof(width_str), "17"); narrow = '0'; break;
+                    case 2600: snprintf(width_str, sizeof(width_str), "16"); narrow = '0'; break;
+                    case 2500: snprintf(width_str, sizeof(width_str), "15"); narrow = '0'; break;
+                    case 2250: snprintf(width_str, sizeof(width_str), "12"); narrow = '0'; break;
+                    case 2100: snprintf(width_str, sizeof(width_str), "11"); narrow = '0'; break;
+                    case 1950: snprintf(width_str, sizeof(width_str), "10"); narrow = '0'; break;
+                    case 1800: snprintf(width_str, sizeof(width_str), "09"); narrow = '0'; break;
+                    case 1650: snprintf(width_str, sizeof(width_str), "08"); narrow = '1'; break;
+                    case 1350: snprintf(width_str, sizeof(width_str), "06"); narrow = '1'; break;
+                    case 1100: snprintf(width_str, sizeof(width_str), "05"); narrow = '1'; break;
+                    case  850: snprintf(width_str, sizeof(width_str), "04"); narrow = '1'; break;
+                    case  600: snprintf(width_str, sizeof(width_str), "03"); narrow = '1'; break;
+                    case  400: snprintf(width_str, sizeof(width_str), "02"); narrow = '1'; break;
+                    case  200: snprintf(width_str, sizeof(width_str), "01"); narrow = '1';  break;
+                    default: return -RIG_EINVAL;
+                }
+                break;
+            case RIG_MODE_AM:
+            //case RIG_MODE_FM: // Can you set passband on FM or FMN for FT991? Returns error for now.
+            case RIG_MODE_PKTFM:
+                if (width < rig_passband_normal(rig, mode))
+                    err = newcat_set_narrow(rig, vfo, TRUE);
+                else
+                    err = newcat_set_narrow(rig, vfo, FALSE);
+                return err;
+            default:
+                return -RIG_EINVAL;
+        }   /* end switch(mode) */
+    }   /* end if FT991 */
+    else if (newcat_is_rig(rig, RIG_MODEL_FT1200)) {
+        switch (mode) {
+            case RIG_MODE_PKTUSB:
+            case RIG_MODE_PKTLSB:
+            case RIG_MODE_RTTY:
+            case RIG_MODE_RTTYR:
+            case RIG_MODE_CW:
+            case RIG_MODE_CWR:
+                switch (width) {
+                    case 2400: snprintf(width_str, sizeof(width_str), "16"); narrow = '0'; break;  /* wide */
+                    case 2000: snprintf(width_str, sizeof(width_str), "15"); narrow = '0'; break;  /* wide */
+                    case 1700: snprintf(width_str, sizeof(width_str), "14"); narrow = '0'; break;
+                    case 1400: snprintf(width_str, sizeof(width_str), "13"); narrow = '0'; break;
+                    case 1200: snprintf(width_str, sizeof(width_str), "12"); narrow = '0'; break;
+                    case  800: snprintf(width_str, sizeof(width_str), "11"); narrow = '0'; break;
+                    case  500: snprintf(width_str, sizeof(width_str), "10"); narrow = '1'; break;
+                    case  450: snprintf(width_str, sizeof(width_str), "09"); narrow = '1'; break;
+                    case  400: snprintf(width_str, sizeof(width_str), "08"); narrow = '1'; break;
+                    case  350: snprintf(width_str, sizeof(width_str), "07"); narrow = '1'; break;
+                    case  300: snprintf(width_str, sizeof(width_str), "06"); narrow = '1'; break;
+                    case  250: snprintf(width_str, sizeof(width_str), "05"); narrow = '1'; break;
+                    case  200: snprintf(width_str, sizeof(width_str), "04"); narrow = '1'; break;
+                    case  150: snprintf(width_str, sizeof(width_str), "03"); narrow = '1'; break;
+                    case  100: snprintf(width_str, sizeof(width_str), "02"); narrow = '1'; break;
+                    case   50: snprintf(width_str, sizeof(width_str), "01"); narrow = '1'; break;
+                    default: return -RIG_EINVAL;
+                }
+                break;
+            case RIG_MODE_LSB:
+            case RIG_MODE_USB:
+                switch (width) {
+                    case 2300: snprintf(width_str, sizeof(width_str), "13"); narrow = '0'; break;  /* normal */
+                    case 1800: snprintf(width_str, sizeof(width_str), "09"); narrow = '0'; break;  /* narrow */
+                    case 3000: snprintf(width_str, sizeof(width_str), "20"); narrow = '0'; break;  /* wide */
+                    case 3200: snprintf(width_str, sizeof(width_str), "21"); narrow = '0'; break;  /* wide */
+                    case 3400: snprintf(width_str, sizeof(width_str), "22"); narrow = '0'; break;  /* wide */
+                    case 3600: snprintf(width_str, sizeof(width_str), "23"); narrow = '0'; break;  /* wide */
+                    case 3800: snprintf(width_str, sizeof(width_str), "24"); narrow = '0'; break;  /* wide */
+                    case 4000: snprintf(width_str, sizeof(width_str), "25"); narrow = '0'; break;  /* wide */
+                    case 2900: snprintf(width_str, sizeof(width_str), "19"); narrow = '0'; break;
+                    case 2800: snprintf(width_str, sizeof(width_str), "18"); narrow = '0'; break;
+                    case 2700: snprintf(width_str, sizeof(width_str), "17"); narrow = '0'; break;
+                    case 2600: snprintf(width_str, sizeof(width_str), "16"); narrow = '0'; break;
+                    case 2500: snprintf(width_str, sizeof(width_str), "15"); narrow = '0'; break;
+                    case 2400: snprintf(width_str, sizeof(width_str), "14"); narrow = '0'; break;
+                    case 2200: snprintf(width_str, sizeof(width_str), "12"); narrow = '0'; break;
+                    case 2100: snprintf(width_str, sizeof(width_str), "11"); narrow = '0'; break;
+                    case 1950: snprintf(width_str, sizeof(width_str), "10"); narrow = '0'; break;
+                    case 1650: snprintf(width_str, sizeof(width_str), "08"); narrow = '1'; break;
+                    case 1500: snprintf(width_str, sizeof(width_str), "07"); narrow = '1'; break;
+                    case 1350: snprintf(width_str, sizeof(width_str), "06"); narrow = '1'; break;
+                    case 1100: snprintf(width_str, sizeof(width_str), "05"); narrow = '1'; break;
+                    case  850: snprintf(width_str, sizeof(width_str), "04"); narrow = '1'; break;
+                    case  600: snprintf(width_str, sizeof(width_str), "03"); narrow = '1'; break;
+                    case  400: snprintf(width_str, sizeof(width_str), "02"); narrow = '1'; break;
+                    case  200: snprintf(width_str, sizeof(width_str), "01"); narrow = '1';  break;
+                    default: return -RIG_EINVAL;
+                }
+                break;
+            case RIG_MODE_AM:
+            case RIG_MODE_FM:
+            case RIG_MODE_PKTFM:
+                if (width < rig_passband_normal(rig, mode))
+                    err = newcat_set_narrow(rig, vfo, TRUE);
+                else
+                    err = newcat_set_narrow(rig, vfo, FALSE);
+                return err;
+            default:
+                return -RIG_EINVAL;
+        }   /* end switch(mode) */
+    } else {   /* end if FT1200 */
+        /* FT450, FT2000, FT5000, FT9000 */
+        switch (mode) {
+            case RIG_MODE_PKTUSB:
+            case RIG_MODE_PKTLSB:
+            case RIG_MODE_RTTY:
+            case RIG_MODE_RTTYR:
+            case RIG_MODE_CW:
+            case RIG_MODE_CWR:
+                switch (width) {
+                    case 1800: snprintf(width_str, sizeof(width_str), "16"); narrow = '0'; break;  /* normal */
+                    case  500: snprintf(width_str, sizeof(width_str), "06"); narrow = '0'; break;  /* narrow */
+                    case 2400: snprintf(width_str, sizeof(width_str), "24"); narrow = '0'; break;  /* wide   */
+                    default: return -RIG_EINVAL;
+                }
+                break;
+            case RIG_MODE_LSB:
+            case RIG_MODE_USB:
+                switch (width) {
+                    case 2400: snprintf(width_str, sizeof(width_str), "16"); narrow = '0'; break;  /* normal */
+                    case 1800: snprintf(width_str, sizeof(width_str), "08"); narrow = '0'; break;  /* narrow */
+                    case 3000: snprintf(width_str, sizeof(width_str), "25"); narrow = '0'; break;  /* wide   */
+                    default: return -RIG_EINVAL;
+                }
+                break;
+            case RIG_MODE_AM:
+            case RIG_MODE_FM:
+            case RIG_MODE_PKTFM:
+                if (width < rig_passband_normal(rig, mode))
+                    err = newcat_set_narrow(rig, vfo, TRUE);
+                else
+                    err = newcat_set_narrow(rig, vfo, FALSE);
+                return err;
+            default:
+                return -RIG_EINVAL;
+        }   /* end switch(mode) */
+    }
+    /* end else */
+
+    rig_debug(RIG_DEBUG_TRACE, "sizeof(width_str) = %d\n", sizeof(width_str) );
+
+    snprintf(priv->cmd_str, sizeof(priv->cmd_str), "NA%c%c;SH%c%s;",
+            main_sub_vfo, narrow, main_sub_vfo, width_str);
+
+    rig_debug(RIG_DEBUG_TRACE, "cmd_str = %s\n", priv->cmd_str);
+
+    /* Set RX Bandwidth */
+    return newcat_set_cmd(rig);
+}
+
+
+static int newcat_set_faststep(RIG * rig, ncboolean fast_step)
+{
+    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
+    char c;
+
+    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
+
+    if (!newcat_valid_command(rig, "FS"))
+        return -RIG_ENAVAIL;
+
+    if (fast_step == TRUE)
+        c = '1';
+    else
+        c = '0';
+
+    snprintf(priv->cmd_str, sizeof(priv->cmd_str), "FS%c;", c);
+
+    rig_debug(RIG_DEBUG_TRACE, "cmd_str = %s\n", priv->cmd_str);
+
+    return newcat_set_cmd(rig);
+}
+
+
+static int newcat_get_faststep(RIG * rig, ncboolean * fast_step)
+{
+    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
+    int err;
+    char c;
+
+    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
+
+    if (!newcat_valid_command(rig, "FS"))
+        return -RIG_ENAVAIL;
+
+    snprintf(priv->cmd_str, sizeof(priv->cmd_str), "FS;");
+    /* Get Fast Step */
+    if (RIG_OK != (err = newcat_get_cmd (rig)))
+      {
+        return err;
+      }
+
+    c = priv->ret_data[2];
+    if (c == '1')
+        *fast_step = TRUE;
+    else
+        *fast_step = FALSE;
+
+    return RIG_OK;
+}
+
+
+static int newcat_vfomem_toggle(RIG * rig)
+{
+    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
+
+    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
+
+    if (!newcat_valid_command(rig, "VM"))
+        return -RIG_ENAVAIL;
+
+    /* copy set command */
+    snprintf(priv->cmd_str, sizeof(priv->cmd_str), "VM;");
+
+    rig_debug(RIG_DEBUG_TRACE, "%s: cmd_str = %s\n", __func__, priv->cmd_str);
+
+    return newcat_set_cmd(rig);
+}
+
 
 /*
  * ************************************
@@ -3375,971 +4325,6 @@ const char *newcat_get_info(RIG * rig)
     return idbuf;
 }
 
-
-/*
- * newcat_valid_command
- *
- * Determine whether or not the command is valid for the specified
- * rig.  This function should be called before sending the command
- * to the rig to make it easier to differentiate invalid and illegal
- * commands (for a rig).
- */
-
-ncboolean newcat_valid_command(RIG *rig, char const * const command) {
-    const struct rig_caps *caps;
-    ncboolean is_ft450;
-    ncboolean is_ft891;
-    ncboolean is_ft950;
-    ncboolean is_ft991;
-    ncboolean is_ft2000;
-    ncboolean is_ft9000;
-    ncboolean is_ft5000;
-    ncboolean is_ft1200;
-    int search_high;
-    int search_index;
-    int search_low;
-
-    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
-    rig_debug(RIG_DEBUG_TRACE, "%s %s\n", __func__,command);
-
-    if (!rig) {
-        rig_debug(RIG_DEBUG_ERR, "%s: Rig argument is invalid\n", __func__);
-        return FALSE;
-    }
-
-    caps = rig->caps;
-    if (!caps) {
-        rig_debug(RIG_DEBUG_ERR, "%s: Rig capabilities not valid\n", __func__);
-        return FALSE;
-    }
-
-    /*
-     * Determine the type of rig from the model number.  Note it is
-     * possible for several model variants to exist; i.e., all the
-     * FT-9000 variants.
-     */
-
-    is_ft450 = newcat_is_rig(rig, RIG_MODEL_FT450);
-    is_ft891 = newcat_is_rig(rig, RIG_MODEL_FT891);
-    is_ft950 = newcat_is_rig(rig, RIG_MODEL_FT950);
-    is_ft991 = newcat_is_rig(rig, RIG_MODEL_FT991);
-    is_ft2000 = newcat_is_rig(rig, RIG_MODEL_FT2000);
-    is_ft9000 = newcat_is_rig(rig, RIG_MODEL_FT9000);
-    is_ft5000 = newcat_is_rig(rig, RIG_MODEL_FTDX5000);
-    is_ft1200 = newcat_is_rig(rig, RIG_MODEL_FT1200);
-
-
-    if (!is_ft450 && !is_ft950 && !is_ft891 && !is_ft991 && !is_ft2000 && !is_ft5000 && !is_ft9000 & !is_ft1200 ) {
-        rig_debug(RIG_DEBUG_ERR, "%s: '%s' is unknown\n",
-                __func__, caps->model_name);
-        return FALSE;
-    }
-
-    /*
-     * Make sure the command is known, and then check to make sure
-     * is it valud for the rig.
-     */
-
-    search_low = 0;
-    search_high = valid_commands_count;
-    while (search_low <= search_high) {
-        int search_test;
-
-        search_index = (search_low + search_high) / 2;
-        search_test = strcmp (valid_commands[search_index].command, command);
-        if (search_test > 0)
-            search_high = search_index - 1;
-        else if (search_test < 0)
-            search_low = search_index + 1;
-        else {
-            /*
-             * The command is valid.  Now make sure it is supported by the rig.
-             */
-            if (is_ft450 && valid_commands[search_index].ft450)
-                return TRUE;
-            else if (is_ft891 && valid_commands[search_index].ft891)
-                return TRUE;
-            else if (is_ft950 && valid_commands[search_index].ft950)
-                return TRUE;
-            else if (is_ft991 && valid_commands[search_index].ft991)
-                return TRUE;
-            else if (is_ft2000 && valid_commands[search_index].ft2000)
-                return TRUE;
-            else if (is_ft5000 && valid_commands[search_index].ft5000)
-                return TRUE;
-            else if (is_ft9000 && valid_commands[search_index].ft9000)
-                return TRUE;
-            else if (is_ft1200 && valid_commands[search_index].ft1200)
-                return TRUE;
-            else {
-                rig_debug(RIG_DEBUG_TRACE, "%s: '%s' command '%s' not supported\n",
-                        __func__, caps->model_name, command);
-                return FALSE;
-            }
-        }
-    }
-
-    rig_debug(RIG_DEBUG_TRACE, "%s: '%s' command '%s' not valid\n",
-            __func__, caps->model_name, command);
-    return FALSE;
-}
-
-
-ncboolean newcat_is_rig(RIG * rig, rig_model_t model) {
-    ncboolean is_rig;
-
-    is_rig = (model == rig->caps->rig_model) ? TRUE : FALSE;
-
-    return is_rig;
-}
-
-
-/*
- * newcat_set_tx_vfo does not set priv->curr_vfo
- */
-int newcat_set_tx_vfo(RIG * rig, vfo_t tx_vfo) {
-    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
-    int err;
-    char p1;
-
-    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
-
-    if (!newcat_valid_command(rig, "FT"))
-        return -RIG_ENAVAIL;
-
-    err = newcat_set_vfo_from_alias(rig, &tx_vfo);
-    if (err < 0)
-        return err;
-
-    switch (tx_vfo) {
-        case RIG_VFO_A:
-            p1 = '0';
-            break;
-        case RIG_VFO_B:
-            p1 = '1';
-            break;
-        case RIG_VFO_MEM:
-            /* VFO A */
-            if (priv->current_mem == NC_MEM_CHANNEL_NONE)
-                return RIG_OK;
-            else    /* Memory Channel mode */
-                p1 = '0';
-            break;
-        default:
-            return -RIG_EINVAL;
-    }
-
-    /* TODO: G4WJS - FT-450 only has toggle command so not sure how to
-       definitively set the TX VFO (VS; doesn't seem to help
-       either) */
-    if (newcat_is_rig(rig, RIG_MODEL_FT950) ||
-        newcat_is_rig(rig, RIG_MODEL_FT2000) ||
-        newcat_is_rig(rig, RIG_MODEL_FTDX5000) ||
-        newcat_is_rig(rig, RIG_MODEL_FT1200) ||
-        newcat_is_rig(rig, RIG_MODEL_FT991))
-      p1 = p1 + 2;            /* use non-Toggle commands */
-
-    snprintf(priv->cmd_str, sizeof(priv->cmd_str), "FT%c;", p1);
-
-    rig_debug(RIG_DEBUG_TRACE, "cmd_str = %s\n", priv->cmd_str);
-
-    /* Set TX VFO */
-    return newcat_set_cmd(rig);
-}
-
-
-/*
- * newcat_get_tx_vfo does not set priv->curr_vfo
- */
-int newcat_get_tx_vfo(RIG * rig, vfo_t * tx_vfo) {
-    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
-    int err;
-    char c;
-    vfo_t vfo_mode;
-
-    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
-
-    if (!newcat_valid_command(rig, "FT"))
-      return -RIG_ENAVAIL;
-    snprintf(priv->cmd_str, sizeof(priv->cmd_str), "FT;");
-    rig_debug(RIG_DEBUG_TRACE, "cmd_str = %s\n", priv->cmd_str);
-
-    /* Get TX VFO */
-    if (RIG_OK != (err = newcat_get_cmd (rig)))
-      {
-        return err;
-      }
-
-    c = priv->ret_data[2];
-    switch (c) {
-        case '0':
-            *tx_vfo = RIG_VFO_A;
-            break;
-        case '1' :
-            *tx_vfo = RIG_VFO_B;
-            break;
-        default:
-            rig_debug(RIG_DEBUG_ERR, "%s: Unknown tx_vfo=%c\n", __func__, c, priv->ret_data);
-            return -RIG_EPROTO;
-    }
-
-    /* Check to see if RIG is in MEM mode */
-    err = newcat_get_vfo_mode(rig, &vfo_mode);
-    if (vfo_mode == RIG_VFO_MEM && *tx_vfo == RIG_VFO_A)
-        *tx_vfo = RIG_VFO_MEM;
-
-    rig_debug(RIG_DEBUG_TRACE, "%s: tx_vfo = %s\n", __func__, rig_strvfo(*tx_vfo));
-
-    return RIG_OK;
-}
-
-
-int newcat_set_vfo_from_alias(RIG * rig, vfo_t * vfo) {
-
-    rig_debug(RIG_DEBUG_TRACE, "%s: alias vfo = %s\n", __func__, rig_strvfo(*vfo));
-
-    switch (*vfo) {
-        case RIG_VFO_A:
-        case RIG_VFO_B:
-        case RIG_VFO_MEM:
-            /* passes through */
-            break;
-        case RIG_VFO_CURR:  /* RIG_VFO_RX == RIG_VFO_CURR */
-        case RIG_VFO_VFO:
-            *vfo = rig->state.current_vfo;
-            break;
-        case RIG_VFO_TX:
-            /* set to another vfo for split or uplink */
-            *vfo = (rig->state.current_vfo == RIG_VFO_B) ? RIG_VFO_A : RIG_VFO_B;
-            break;
-        case RIG_VFO_MAIN:
-            *vfo = RIG_VFO_A;
-            break;
-        case RIG_VFO_SUB:
-            *vfo = RIG_VFO_B;
-            break;
-        default:
-            rig_debug(RIG_DEBUG_TRACE, "Unrecognized.  vfo= %d\n", *vfo);
-            return -RIG_EINVAL;
-    }
-
-    return RIG_OK;
-}
-
-/*
- *	Found newcat_set_level() floating point math problem
- *	Using rigctl on FT950 I was trying to set RIG_LEVEL_COMP to 12
- *	I kept setting it to 11.  I wrote some test software and
- *	found out that 0.12 * 100 = 11 with my setup.
- *  Compilier is gcc 4.2.4, CPU is AMD X2
- *  This works somewhat but Find a better way.
- *  The newcat_get_level() seems to work correctly.
- *  Terry KJ4EED
- *
- */
-int newcat_scale_float(int scale, float fval) {
-    float f;
-    float fudge = 0.003;
-
-    if ((fval + fudge) > 1.0)
-        f = scale * fval;
-    else
-        f = scale * (fval + fudge);
-
-    return (int) f;
-}
-
-
-int newcat_set_narrow(RIG * rig, vfo_t vfo, ncboolean narrow)
-{
-    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
-    int err;
-    char c;
-    char main_sub_vfo = '0';
-
-    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
-
-    if (!newcat_valid_command(rig, "NA"))
-        return -RIG_ENAVAIL;
-
-    err = newcat_set_vfo_from_alias(rig, &vfo);
-    if (err < 0)
-        return err;
-
-    if (newcat_is_rig(rig, RIG_MODEL_FT9000) ||
-            newcat_is_rig(rig, RIG_MODEL_FT2000) ||
-            newcat_is_rig(rig, RIG_MODEL_FTDX5000))
-        main_sub_vfo = (RIG_VFO_B == vfo) ? '1' : '0';
-
-    if (narrow == TRUE)
-        c = '1';
-    else
-        c = '0';
-
-    snprintf(priv->cmd_str, sizeof(priv->cmd_str), "NA%c%c;", main_sub_vfo, c);
-
-    rig_debug(RIG_DEBUG_TRACE, "cmd_str = %s\n", priv->cmd_str);
-
-    return newcat_set_cmd(rig);
-}
-
-
-int newcat_get_narrow(RIG * rig, vfo_t vfo, ncboolean * narrow)
-{
-    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
-    int err;
-    char c;
-    char main_sub_vfo = '0';
-
-    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
-
-    if (!newcat_valid_command(rig, "NA"))
-        return -RIG_ENAVAIL;
-
-    err = newcat_set_vfo_from_alias(rig, &vfo);
-    if (err < 0)
-        return err;
-
-    if (newcat_is_rig(rig, RIG_MODEL_FT9000) ||
-            newcat_is_rig(rig, RIG_MODEL_FT2000) ||
-            newcat_is_rig(rig, RIG_MODEL_FTDX5000))
-        main_sub_vfo = (RIG_VFO_B == vfo) ? '1' : '0';
-
-    snprintf(priv->cmd_str, sizeof(priv->cmd_str), "NA%c;", main_sub_vfo);
-    /* Get NAR */
-    if (RIG_OK != (err = newcat_get_cmd (rig)))
-      {
-        return err;
-      }
-
-    c = priv->ret_data[3];
-    if (c == '1')
-        *narrow = TRUE;
-    else
-        *narrow = FALSE;
-
-    return RIG_OK;
-}
-
-
-int newcat_set_rx_bandwidth(RIG *rig, vfo_t vfo, rmode_t mode, pbwidth_t width)
-{
-    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
-    int err;
-    char width_str[6];        /* extra larger buffer */
-    char main_sub_vfo = '0';
-    char narrow = '0';
-
-    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
-    rig_debug(RIG_DEBUG_TRACE, "%s vfo=%d, mode=%d, width=%d\n", __func__, vfo, mode, width);
-
-    if (!newcat_valid_command(rig, "SH"))
-        return -RIG_ENAVAIL;
-
-    err = newcat_set_vfo_from_alias(rig, &vfo);
-    if (err < 0)
-        return err;
-
-    if (newcat_is_rig(rig, RIG_MODEL_FT9000) ||
-            newcat_is_rig(rig, RIG_MODEL_FTDX5000))
-        main_sub_vfo = (RIG_VFO_B == vfo) ? '1' : '0';
-
-    if (newcat_is_rig(rig, RIG_MODEL_FT950)) {
-        switch (mode) {
-            case RIG_MODE_PKTUSB:
-            case RIG_MODE_PKTLSB:
-            case RIG_MODE_RTTY:
-            case RIG_MODE_RTTYR:
-            case RIG_MODE_CW:
-            case RIG_MODE_CWR:
-                switch (width) {
-                    case 1700: snprintf(width_str, sizeof(width_str), "11"); narrow = '0'; break;  /* normal */
-                    case  500: snprintf(width_str, sizeof(width_str), "07"); narrow = '0'; break;  /* narrow */
-                    case 2400: snprintf(width_str, sizeof(width_str), "13"); narrow = '0'; break;  /* wide */
-                    case 2000: snprintf(width_str, sizeof(width_str), "12"); narrow = '0'; break;
-                    case 1400: snprintf(width_str, sizeof(width_str), "10"); narrow = '0'; break;
-                    case 1200: snprintf(width_str, sizeof(width_str), "09"); narrow = '0'; break;
-                    case  800: snprintf(width_str, sizeof(width_str), "08"); narrow = '0'; break;
-                    case  400: snprintf(width_str, sizeof(width_str), "06"); narrow = '1'; break;
-                    case  300: snprintf(width_str, sizeof(width_str), "05"); narrow = '1'; break;
-                    case  200: snprintf(width_str, sizeof(width_str), "04"); narrow = '1'; break;
-                    case  100: snprintf(width_str, sizeof(width_str), "03"); narrow = '1'; break;
-                    default: return -RIG_EINVAL;
-                }
-                break;
-            case RIG_MODE_LSB:
-            case RIG_MODE_USB:
-                switch (width) {
-                    case 2400: snprintf(width_str, sizeof(width_str), "13"); narrow = '0'; break;  /* normal */
-                    case 1800: snprintf(width_str, sizeof(width_str), "09"); narrow = '0'; break;  /* narrow */
-                    case 3000: snprintf(width_str, sizeof(width_str), "20"); narrow = '0'; break;  /* wide */
-                    case 2900: snprintf(width_str, sizeof(width_str), "19"); narrow = '0'; break;
-                    case 2800: snprintf(width_str, sizeof(width_str), "18"); narrow = '0'; break;
-                    case 2700: snprintf(width_str, sizeof(width_str), "17"); narrow = '0'; break;
-                    case 2600: snprintf(width_str, sizeof(width_str), "16"); narrow = '0'; break;
-                    case 2500: snprintf(width_str, sizeof(width_str), "15"); narrow = '0'; break;
-                    case 2450: snprintf(width_str, sizeof(width_str), "14"); narrow = '0'; break;
-                    case 2250: snprintf(width_str, sizeof(width_str), "12"); narrow = '0'; break;
-                    case 2100: snprintf(width_str, sizeof(width_str), "11"); narrow = '0'; break;
-                    case 1950: snprintf(width_str, sizeof(width_str), "10"); narrow = '0'; break;
-                    case 1650: snprintf(width_str, sizeof(width_str), "08"); narrow = '1'; break;
-                    case 1500: snprintf(width_str, sizeof(width_str), "07"); narrow = '1'; break;
-                    case 1350: snprintf(width_str, sizeof(width_str), "06"); narrow = '1'; break;
-                    case 1100: snprintf(width_str, sizeof(width_str), "05"); narrow = '1'; break;
-                    case  850: snprintf(width_str, sizeof(width_str), "04"); narrow = '1'; break;
-                    case  600: snprintf(width_str, sizeof(width_str), "03"); narrow = '1'; break;
-                    case  400: snprintf(width_str, sizeof(width_str), "02"); narrow = '1'; break;
-                    case  200: snprintf(width_str, sizeof(width_str), "01"); narrow = '1';  break;
-                    default: return -RIG_EINVAL;
-                }
-                break;
-            case RIG_MODE_AM:
-            case RIG_MODE_FM:
-            case RIG_MODE_PKTFM:
-                if (width < rig_passband_normal(rig, mode))
-                    err = newcat_set_narrow(rig, vfo, TRUE);
-                else
-                    err = newcat_set_narrow(rig, vfo, FALSE);
-                return err;
-            default:
-                return -RIG_EINVAL;
-        }   /* end switch(mode) */
-    }   /* end if FT950 */
-    else if (newcat_is_rig(rig, RIG_MODEL_FT991) || newcat_is_rig(rig, RIG_MODEL_FT891)) {
-        switch (mode) {
-            case RIG_MODE_PKTUSB:
-            case RIG_MODE_PKTLSB:
-            case RIG_MODE_RTTY:
-            case RIG_MODE_RTTYR:
-            case RIG_MODE_CW:
-            case RIG_MODE_CWR:
-                switch (width) { // the defaults can be different for CW and RTTY (e.g. FT991) but I don't think it matters here
-                    case 1700: snprintf(width_str, sizeof(width_str), "14"); narrow = '0'; break;  /* normal */
-                    case  500: snprintf(width_str, sizeof(width_str), "10"); narrow = '0'; break;  /* narrow */
-                    case 3000: snprintf(width_str, sizeof(width_str), "17"); narrow = '0'; break;  /* wide */
-                    case 2400: snprintf(width_str, sizeof(width_str), "16"); narrow = '0'; break;
-                    case 2000: snprintf(width_str, sizeof(width_str), "15"); narrow = '0'; break;
-                    case 1400: snprintf(width_str, sizeof(width_str), "13"); narrow = '0'; break;
-                    case 1200: snprintf(width_str, sizeof(width_str), "12"); narrow = '0'; break;
-                    case  800: snprintf(width_str, sizeof(width_str), "11"); narrow = '0'; break;
-                    case  450: snprintf(width_str, sizeof(width_str), "09"); narrow = '1'; break;
-                    case  400: snprintf(width_str, sizeof(width_str), "08"); narrow = '1'; break;
-                    case  350: snprintf(width_str, sizeof(width_str), "07"); narrow = '1'; break;
-                    case  300: snprintf(width_str, sizeof(width_str), "06"); narrow = '1'; break;
-                    case  250: snprintf(width_str, sizeof(width_str), "05"); narrow = '1'; break;
-                    case  200: snprintf(width_str, sizeof(width_str), "04"); narrow = '1'; break;
-                    case  150: snprintf(width_str, sizeof(width_str), "03"); narrow = '1'; break;
-                    case  100: snprintf(width_str, sizeof(width_str), "02"); narrow = '1'; break;
-                    case   50: snprintf(width_str, sizeof(width_str), "01"); narrow = '1'; break;
-                    default: return -RIG_EINVAL;
-                }
-                break;
-            case RIG_MODE_LSB:
-            case RIG_MODE_USB:
-                switch (width) {
-                    case 2400: snprintf(width_str, sizeof(width_str), "14"); narrow = '0'; break;  /* normal */
-                    case 1500: snprintf(width_str, sizeof(width_str), "07"); narrow = '0'; break;  /* narrow */
-                    case 3200: snprintf(width_str, sizeof(width_str), "21"); narrow = '0'; break;  /* wide */
-                    case 3000: snprintf(width_str, sizeof(width_str), "20"); narrow = '0'; break;
-                    case 2900: snprintf(width_str, sizeof(width_str), "19"); narrow = '0'; break;
-                    case 2800: snprintf(width_str, sizeof(width_str), "18"); narrow = '0'; break;
-                    case 2700: snprintf(width_str, sizeof(width_str), "17"); narrow = '0'; break;
-                    case 2600: snprintf(width_str, sizeof(width_str), "16"); narrow = '0'; break;
-                    case 2500: snprintf(width_str, sizeof(width_str), "15"); narrow = '0'; break;
-                    case 2250: snprintf(width_str, sizeof(width_str), "12"); narrow = '0'; break;
-                    case 2100: snprintf(width_str, sizeof(width_str), "11"); narrow = '0'; break;
-                    case 1950: snprintf(width_str, sizeof(width_str), "10"); narrow = '0'; break;
-                    case 1800: snprintf(width_str, sizeof(width_str), "09"); narrow = '0'; break;
-                    case 1650: snprintf(width_str, sizeof(width_str), "08"); narrow = '1'; break;
-                    case 1350: snprintf(width_str, sizeof(width_str), "06"); narrow = '1'; break;
-                    case 1100: snprintf(width_str, sizeof(width_str), "05"); narrow = '1'; break;
-                    case  850: snprintf(width_str, sizeof(width_str), "04"); narrow = '1'; break;
-                    case  600: snprintf(width_str, sizeof(width_str), "03"); narrow = '1'; break;
-                    case  400: snprintf(width_str, sizeof(width_str), "02"); narrow = '1'; break;
-                    case  200: snprintf(width_str, sizeof(width_str), "01"); narrow = '1';  break;
-                    default: return -RIG_EINVAL;
-                }
-                break;
-            case RIG_MODE_AM:
-            //case RIG_MODE_FM: // Can you set passband on FM or FMN for FT991? Returns error for now.
-            case RIG_MODE_PKTFM:
-                if (width < rig_passband_normal(rig, mode))
-                    err = newcat_set_narrow(rig, vfo, TRUE);
-                else
-                    err = newcat_set_narrow(rig, vfo, FALSE);
-                return err;
-            default:
-                return -RIG_EINVAL;
-        }   /* end switch(mode) */
-    }   /* end if FT991 */
-    else if (newcat_is_rig(rig, RIG_MODEL_FT1200)) {
-        switch (mode) {
-            case RIG_MODE_PKTUSB:
-            case RIG_MODE_PKTLSB:
-            case RIG_MODE_RTTY:
-            case RIG_MODE_RTTYR:
-            case RIG_MODE_CW:
-            case RIG_MODE_CWR:
-                switch (width) {
-                    case 2400: snprintf(width_str, sizeof(width_str), "16"); narrow = '0'; break;  /* wide */
-                    case 2000: snprintf(width_str, sizeof(width_str), "15"); narrow = '0'; break;  /* wide */
-                    case 1700: snprintf(width_str, sizeof(width_str), "14"); narrow = '0'; break;
-                    case 1400: snprintf(width_str, sizeof(width_str), "13"); narrow = '0'; break;
-                    case 1200: snprintf(width_str, sizeof(width_str), "12"); narrow = '0'; break;
-                    case  800: snprintf(width_str, sizeof(width_str), "11"); narrow = '0'; break;
-                    case  500: snprintf(width_str, sizeof(width_str), "10"); narrow = '1'; break;
-                    case  450: snprintf(width_str, sizeof(width_str), "09"); narrow = '1'; break;
-                    case  400: snprintf(width_str, sizeof(width_str), "08"); narrow = '1'; break;
-                    case  350: snprintf(width_str, sizeof(width_str), "07"); narrow = '1'; break;
-                    case  300: snprintf(width_str, sizeof(width_str), "06"); narrow = '1'; break;
-                    case  250: snprintf(width_str, sizeof(width_str), "05"); narrow = '1'; break;
-                    case  200: snprintf(width_str, sizeof(width_str), "04"); narrow = '1'; break;
-                    case  150: snprintf(width_str, sizeof(width_str), "03"); narrow = '1'; break;
-                    case  100: snprintf(width_str, sizeof(width_str), "02"); narrow = '1'; break;
-                    case   50: snprintf(width_str, sizeof(width_str), "01"); narrow = '1'; break;
-                    default: return -RIG_EINVAL;
-                }
-                break;
-            case RIG_MODE_LSB:
-            case RIG_MODE_USB:
-                switch (width) {
-                    case 2300: snprintf(width_str, sizeof(width_str), "13"); narrow = '0'; break;  /* normal */
-                    case 1800: snprintf(width_str, sizeof(width_str), "09"); narrow = '0'; break;  /* narrow */
-                    case 3000: snprintf(width_str, sizeof(width_str), "20"); narrow = '0'; break;  /* wide */
-                    case 3200: snprintf(width_str, sizeof(width_str), "21"); narrow = '0'; break;  /* wide */
-                    case 3400: snprintf(width_str, sizeof(width_str), "22"); narrow = '0'; break;  /* wide */
-                    case 3600: snprintf(width_str, sizeof(width_str), "23"); narrow = '0'; break;  /* wide */
-                    case 3800: snprintf(width_str, sizeof(width_str), "24"); narrow = '0'; break;  /* wide */
-                    case 4000: snprintf(width_str, sizeof(width_str), "25"); narrow = '0'; break;  /* wide */
-                    case 2900: snprintf(width_str, sizeof(width_str), "19"); narrow = '0'; break;
-                    case 2800: snprintf(width_str, sizeof(width_str), "18"); narrow = '0'; break;
-                    case 2700: snprintf(width_str, sizeof(width_str), "17"); narrow = '0'; break;
-                    case 2600: snprintf(width_str, sizeof(width_str), "16"); narrow = '0'; break;
-                    case 2500: snprintf(width_str, sizeof(width_str), "15"); narrow = '0'; break;
-                    case 2400: snprintf(width_str, sizeof(width_str), "14"); narrow = '0'; break;
-                    case 2200: snprintf(width_str, sizeof(width_str), "12"); narrow = '0'; break;
-                    case 2100: snprintf(width_str, sizeof(width_str), "11"); narrow = '0'; break;
-                    case 1950: snprintf(width_str, sizeof(width_str), "10"); narrow = '0'; break;
-                    case 1650: snprintf(width_str, sizeof(width_str), "08"); narrow = '1'; break;
-                    case 1500: snprintf(width_str, sizeof(width_str), "07"); narrow = '1'; break;
-                    case 1350: snprintf(width_str, sizeof(width_str), "06"); narrow = '1'; break;
-                    case 1100: snprintf(width_str, sizeof(width_str), "05"); narrow = '1'; break;
-                    case  850: snprintf(width_str, sizeof(width_str), "04"); narrow = '1'; break;
-                    case  600: snprintf(width_str, sizeof(width_str), "03"); narrow = '1'; break;
-                    case  400: snprintf(width_str, sizeof(width_str), "02"); narrow = '1'; break;
-                    case  200: snprintf(width_str, sizeof(width_str), "01"); narrow = '1';  break;
-                    default: return -RIG_EINVAL;
-                }
-                break;
-            case RIG_MODE_AM:
-            case RIG_MODE_FM:
-            case RIG_MODE_PKTFM:
-                if (width < rig_passband_normal(rig, mode))
-                    err = newcat_set_narrow(rig, vfo, TRUE);
-                else
-                    err = newcat_set_narrow(rig, vfo, FALSE);
-                return err;
-            default:
-                return -RIG_EINVAL;
-        }   /* end switch(mode) */
-    } else {   /* end if FT1200 */
-        /* FT450, FT2000, FT5000, FT9000 */
-        switch (mode) {
-            case RIG_MODE_PKTUSB:
-            case RIG_MODE_PKTLSB:
-            case RIG_MODE_RTTY:
-            case RIG_MODE_RTTYR:
-            case RIG_MODE_CW:
-            case RIG_MODE_CWR:
-                switch (width) {
-                    case 1800: snprintf(width_str, sizeof(width_str), "16"); narrow = '0'; break;  /* normal */
-                    case  500: snprintf(width_str, sizeof(width_str), "06"); narrow = '0'; break;  /* narrow */
-                    case 2400: snprintf(width_str, sizeof(width_str), "24"); narrow = '0'; break;  /* wide   */
-                    default: return -RIG_EINVAL;
-                }
-                break;
-            case RIG_MODE_LSB:
-            case RIG_MODE_USB:
-                switch (width) {
-                    case 2400: snprintf(width_str, sizeof(width_str), "16"); narrow = '0'; break;  /* normal */
-                    case 1800: snprintf(width_str, sizeof(width_str), "08"); narrow = '0'; break;  /* narrow */
-                    case 3000: snprintf(width_str, sizeof(width_str), "25"); narrow = '0'; break;  /* wide   */
-                    default: return -RIG_EINVAL;
-                }
-                break;
-            case RIG_MODE_AM:
-            case RIG_MODE_FM:
-            case RIG_MODE_PKTFM:
-                if (width < rig_passband_normal(rig, mode))
-                    err = newcat_set_narrow(rig, vfo, TRUE);
-                else
-                    err = newcat_set_narrow(rig, vfo, FALSE);
-                return err;
-            default:
-                return -RIG_EINVAL;
-        }   /* end switch(mode) */
-    }
-    /* end else */
-
-    rig_debug(RIG_DEBUG_TRACE, "sizeof(width_str) = %d\n", sizeof(width_str) );
-
-    snprintf(priv->cmd_str, sizeof(priv->cmd_str), "NA%c%c;SH%c%s;",
-            main_sub_vfo, narrow, main_sub_vfo, width_str);
-
-    rig_debug(RIG_DEBUG_TRACE, "cmd_str = %s\n", priv->cmd_str);
-
-    /* Set RX Bandwidth */
-    return newcat_set_cmd(rig);
-}
-
-
-int newcat_get_rx_bandwidth(RIG *rig, vfo_t vfo, rmode_t mode, pbwidth_t *width)
-{
-    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
-    int err;
-    int ret_data_len;
-    char *retlvl;
-    int w;
-    char main_sub_vfo = '0';
-
-    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
-
-    if (!newcat_valid_command(rig, "SH"))
-        return -RIG_ENAVAIL;
-
-    err = newcat_set_vfo_from_alias(rig, &vfo);
-    if (err < 0)
-        return err;
-
-    if (newcat_is_rig(rig, RIG_MODEL_FT9000) ||
-            newcat_is_rig(rig, RIG_MODEL_FTDX5000))
-        main_sub_vfo = (RIG_VFO_B == vfo) ? '1' : '0';
-
-    snprintf(priv->cmd_str, sizeof(priv->cmd_str), "SH%c;", main_sub_vfo);
-
-    /* Get RX BANDWIDTH */
-    if (RIG_OK != (err = newcat_get_cmd (rig)))
-      {
-        return err;
-      }
-
-    ret_data_len = strlen(priv->ret_data);
-
-    /* skip command */
-    retlvl = priv->ret_data + strlen(priv->cmd_str)-1;
-    /* chop term */
-    priv->ret_data[ret_data_len-1] = '\0';
-
-    w = atoi(retlvl);   /*  width */
-
-    if (newcat_is_rig(rig, RIG_MODEL_FT950)) {
-        switch (mode) {
-            case RIG_MODE_PKTUSB:
-            case RIG_MODE_PKTLSB:
-            case RIG_MODE_RTTY:
-            case RIG_MODE_RTTYR:
-            case RIG_MODE_CW:
-            case RIG_MODE_CWR:
-                switch (w) {
-                    case 11: *width = 1700; break;  /* normal */
-                    case  0:
-                    case  7: *width =  500; break;  /* narrow */
-                    case 13: *width = 2400; break;  /* wide   */
-                    case 12: *width = 2000; break;
-                    case 10: *width = 1400; break;
-                    case  9: *width = 1200; break;
-                    case  8: *width =  800; break;
-                    case  6: *width =  400; break;
-                    case  5: *width =  300; break;
-                    case  3: *width =  100; break;
-                    case  4: *width =  200; break;
-                    default: return -RIG_EINVAL;
-                }
-                break;
-            case RIG_MODE_LSB:
-            case RIG_MODE_USB:
-                switch (w) {
-                    case  0:
-                    case 13: *width = 2400; break;  /* normal */
-                    case  9: *width = 1800; break;  /* narrow */
-                    case 20: *width = 3000; break;  /* wide   */
-                    case 19: *width = 2900; break;
-                    case 18: *width = 2800; break;
-                    case 17: *width = 2700; break;
-                    case 16: *width = 2600; break;
-                    case 15: *width = 2500; break;
-                    case 14: *width = 2450; break;
-                    case 12: *width = 2250; break;
-                    case 11: *width = 2100; break;
-                    case 10: *width = 1950; break;
-                    case  8: *width = 1650; break;
-                    case  7: *width = 1500; break;
-                    case  6: *width = 1350; break;
-                    case  5: *width = 1100; break;
-                    case  4: *width =  850; break;
-                    case  3: *width =  600; break;
-                    case  2: *width =  400; break;
-                    case  1: *width =  200; break;
-                    default: return -RIG_EINVAL;
-                }
-                break;
-            case RIG_MODE_AM:
-            case RIG_MODE_PKTFM:
-            case RIG_MODE_FM:
-                return RIG_OK;
-            default:
-                return -RIG_EINVAL;
-        }   /* end switch(mode) */
-
-    }   /* end if FT950 */
-    else if (newcat_is_rig(rig, RIG_MODEL_FT1200)) {
-        switch (mode) {
-            case RIG_MODE_PKTUSB:
-            case RIG_MODE_PKTLSB:
-            case RIG_MODE_RTTY:
-            case RIG_MODE_RTTYR:
-            case RIG_MODE_CW:
-            case RIG_MODE_CWR:
-                switch (w) {
-                    case  0:
-                    case 10: *width =  500; break;  /* narrow */
-                    case 16: *width = 2400; break;  /* wide   */
-                    case 15: *width = 2000; break;  /* wide   */
-                    case 14: *width = 1700; break;  /* wide   */
-                    case 13: *width = 1400; break;  /* wide   */
-                    case 12: *width = 1200; break;
-                    case 11: *width =  800; break;
-                    case  9: *width =  450; break;
-                    case  8: *width =  400; break;
-                    case  7: *width =  350; break;
-                    case  6: *width =  300; break;
-                    case  5: *width =  250; break;
-                    case  4: *width =  200; break;
-                    case  3: *width =  150; break;
-                    case  2: *width =  100; break;
-                    case  1: *width =   50; break;
-                    default: return -RIG_EINVAL;
-                }
-                break;
-            case RIG_MODE_LSB:
-            case RIG_MODE_USB:
-                switch (w) {
-                    case  0:
-                    case 14: *width = 2400; break;  /* normal */
-                    case  9: *width = 1800; break;  /* narrow */
-                    case 25: *width = 4000; break;  /* wide   */
-                    case 24: *width = 3800; break;  /* wide   */
-                    case 23: *width = 3600; break;  /* wide   */
-                    case 22: *width = 3400; break;  /* wide   */
-                    case 21: *width = 3200; break;  /* wide   */
-                    case 20: *width = 3000; break;  /* wide   */
-                    case 19: *width = 2900; break;
-                    case 18: *width = 2800; break;
-                    case 17: *width = 2700; break;
-                    case 16: *width = 2600; break;
-                    case 15: *width = 2500; break;
-                    case 13: *width = 2300; break;
-                    case 12: *width = 2200; break;
-                    case 11: *width = 2100; break;
-                    case 10: *width = 1950; break;
-                    case  8: *width = 1650; break;
-                    case  7: *width = 1500; break;
-                    case  6: *width = 1350; break;
-                    case  5: *width = 1100; break;
-                    case  4: *width =  850; break;
-                    case  3: *width =  600; break;
-                    case  2: *width =  400; break;
-                    case  1: *width =  200; break;
-                    default: return -RIG_EINVAL;
-                }
-                break;
-            case RIG_MODE_AM:
-            case RIG_MODE_PKTFM:
-            case RIG_MODE_FM:
-                return RIG_OK;
-            default:
-                return -RIG_EINVAL;
-        }   /* end switch(mode) */
-
-    }  else { /* end if FT950 */
-        /* FT450, FT2000, FT5000, FT9000 */
-        switch (mode) {
-            case RIG_MODE_PKTUSB:
-            case RIG_MODE_PKTLSB:
-            case RIG_MODE_RTTY:
-            case RIG_MODE_RTTYR:
-            case RIG_MODE_CW:
-            case RIG_MODE_CWR:
-            case RIG_MODE_LSB:
-            case RIG_MODE_USB:
-                if (w < 16)
-                    *width = rig_passband_narrow(rig, mode);
-                else if (w > 16)
-                    *width = rig_passband_wide(rig, mode);
-                else
-                    *width = rig_passband_normal(rig, mode);
-                break;
-            case RIG_MODE_AM:
-            case RIG_MODE_PKTFM:
-            case RIG_MODE_FM:
-                return RIG_OK;
-            default:
-                return -RIG_EINVAL;
-        }   /* end switch (mode) */
-    }   /* end else */
-
-    return RIG_OK;
-}
-
-
-int newcat_set_faststep(RIG * rig, ncboolean fast_step)
-{
-    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
-    char c;
-
-    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
-
-    if (!newcat_valid_command(rig, "FS"))
-        return -RIG_ENAVAIL;
-
-    if (fast_step == TRUE)
-        c = '1';
-    else
-        c = '0';
-
-    snprintf(priv->cmd_str, sizeof(priv->cmd_str), "FS%c;", c);
-
-    rig_debug(RIG_DEBUG_TRACE, "cmd_str = %s\n", priv->cmd_str);
-
-    return newcat_set_cmd(rig);
-}
-
-
-int newcat_get_faststep(RIG * rig, ncboolean * fast_step)
-{
-    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
-    int err;
-    char c;
-
-    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
-
-    if (!newcat_valid_command(rig, "FS"))
-        return -RIG_ENAVAIL;
-
-    snprintf(priv->cmd_str, sizeof(priv->cmd_str), "FS;");
-    /* Get Fast Step */
-    if (RIG_OK != (err = newcat_get_cmd (rig)))
-      {
-        return err;
-      }
-
-    c = priv->ret_data[2];
-    if (c == '1')
-        *fast_step = TRUE;
-    else
-        *fast_step = FALSE;
-
-    return RIG_OK;
-}
-
-
-int newcat_get_rigid(RIG * rig)
-{
-    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
-    const char * s = NULL;
-
-    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
-
-    /* if first valid get */
-    if (priv->rig_id == NC_RIGID_NONE) {
-        s = newcat_get_info(rig);
-        if (s != NULL) {
-            s +=2;      /* ID0310, jump past ID */
-            priv->rig_id = atoi(s);
-        }
-    }
-
-    rig_debug(RIG_DEBUG_TRACE, "rig_id = %d, *s = %s\n", priv->rig_id, s);
-
-    return priv->rig_id;
-}
-
-
-/*
- * input:   RIG *, vfo_t *
- * output:  VFO mode: RIG_VFO_VFO for VFO A and B
- *                    RIG_VFO_MEM for VFO MEM
- * return: RIG_OK or error
- */
-int newcat_get_vfo_mode(RIG * rig, vfo_t * vfo_mode)
-{
-    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
-    int err;
-
-    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
-
-    if (!newcat_valid_command(rig, "IF"))
-        return -RIG_ENAVAIL;
-
-    /* Get VFO A Information ****************** */
-    snprintf(priv->cmd_str, sizeof(priv->cmd_str), "IF;");
-    if (RIG_OK != (err = newcat_get_cmd (rig)))
-      {
-        return err;
-      }
-
-    /* vfo, mem, P7 ************************** */
-    // e.g. FT450 has 27 byte IF response, FT991 has 28 byte if response (one more byte for P2 VFO A Freq)
-    // so we now check to ensure we know the length of the response
-    int offset = 0;
-    switch(strlen(priv->ret_data)) {
-        case 27: offset = 21;priv->width_frequency=8;break;
-        case 28: offset = 22;priv->width_frequency=9;break;
-        default:
-          rig_debug(RIG_DEBUG_ERR,"%s: incorrect length of IF response, expected 27 or 28, got %d",__func__,strlen(priv->ret_data));
-          return -RIG_EPROTO;
-    }
-    rig_debug(RIG_DEBUG_TRACE, "%s: offset=%d, width_frequeny=%d\n", __func__,offset,priv->width_frequency);
-    switch (priv->ret_data[offset]) {
-        case '0': *vfo_mode = RIG_VFO_VFO; break;
-        case '1':   /* Memory */
-        case '2':   /* Memory Tune */
-        case '3':   /* Quick Memory Bank */
-        case '4':   /* Quick Memory Bank Tune */
-        default:
-                  *vfo_mode = RIG_VFO_MEM;
-    }
-
-    rig_debug(RIG_DEBUG_TRACE, "%s: vfo mode = %d\n", __func__, *vfo_mode);
-
-    return err;
-}
-
-
-/*
- * Writed data and waits for responce
- * input:  complete CAT command string including termination in cmd_str
- * output: complete CAT command answer string in ret_data
- * return: RIG_OK or error
- */
-
-
-int newcat_vfomem_toggle(RIG * rig)
-{
-    struct newcat_priv_data *priv = (struct newcat_priv_data *)rig->state.priv;
-
-    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
-
-    if (!newcat_valid_command(rig, "VM"))
-        return -RIG_ENAVAIL;
-
-    /* copy set command */
-    snprintf(priv->cmd_str, sizeof(priv->cmd_str), "VM;");
-
-    rig_debug(RIG_DEBUG_TRACE, "%s: cmd_str = %s\n", __func__, priv->cmd_str);
-
-    return newcat_set_cmd(rig);
-}
 
 /*
  * Writes a null  terminated command string from  priv->cmd_str to the
